@@ -5,6 +5,7 @@ import csv
 import itertools
 import json
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -178,6 +179,62 @@ async def cmd_run(args: list[str]):
     # 自动导出
     if config.get("output", {}).get("auto_export_csv"):
         export_csv(None)
+
+
+# ─── 命令：radar ──────────────────────────────────────────────
+
+async def cmd_radar(args: list[str]):
+    """运行 AI 工具会员关键词雷达。"""
+    keywords = []
+    days = None
+    limit = None
+    headless = None
+    fetch_comments = True
+    i = 0
+    while i < len(args):
+        if args[i] == "--keyword" and i + 1 < len(args):
+            keywords.append(args[i + 1])
+            i += 2
+        elif args[i] == "--days" and i + 1 < len(args):
+            days = int(args[i + 1])
+            i += 2
+        elif args[i] == "--limit" and i + 1 < len(args):
+            limit = int(args[i + 1])
+            i += 2
+        elif args[i] == "--headed":
+            headless = False
+            i += 1
+        elif args[i] == "--headless":
+            headless = True
+            i += 1
+        elif args[i] == "--no-comments":
+            fetch_comments = False
+            i += 1
+        else:
+            i += 1
+
+    from radar import RadarRunner
+
+    try:
+        result = await RadarRunner(headless=headless).run(
+            keywords=keywords or None,
+            days=days,
+            limit=limit,
+            fetch_comments=fetch_comments,
+        )
+    except Exception as exc:
+        logger.error("雷达运行失败: %s", exc)
+        return
+
+    logger.info(
+        "雷达完成：发现 %d 条作品，处理 %d 条；Excel=%s",
+        result["discovered"], result["works"], result["files"].get("xlsx") or "未安装 openpyxl",
+    )
+    logger.info("作品 CSV：%s", result["files"].get("works_csv"))
+    logger.info("线索 CSV：%s", result["files"].get("leads_csv"))
+    if result.get("errors"):
+        logger.warning("有 %d 个关键词未完成，请检查登录态和 Playwright 浏览器：%s",
+                       len(result["errors"]), " | ".join(result["errors"][:3]))
 
 
 # ─── 命令：report ──────────────────────────────────────────────
@@ -358,12 +415,19 @@ async def cmd_login(_args=None):
     logger.info("打开浏览器（会话: %s），请扫码...", session_dir.name)
     session_dir.mkdir(parents=True, exist_ok=True)
     context = await async_playwright().start()
-    ctx = await context.chromium.launch_persistent_context(
+    from config_manager import get_browser_executable
+    launch_options = dict(
         user_data_dir=str(session_dir),
         headless=False,
         viewport={"width": 1920, "height": 1080},
         locale="zh-CN",
     )
+    executable = get_browser_executable()
+    if executable:
+        launch_options["executable_path"] = str(executable)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        launch_options["args"] = ["--no-sandbox"]
+    ctx = await context.chromium.launch_persistent_context(**launch_options)
     page = await ctx.new_page()
     await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
     logger.info("请在浏览器中完成登录，然后按 Enter...")
@@ -390,6 +454,73 @@ def cmd_web(args: list[str]):
     import uvicorn
     logger.info("启动面板 → http://127.0.0.1:%d", port)
     uvicorn.run("web.app:app", host="127.0.0.1", port=port, reload=True)
+
+
+# ─── 命令：doctor ─────────────────────────────────────────────
+
+def cmd_doctor(_args=None):
+    """检查雷达运行所需的 Python、配置、数据库、会话和浏览器。"""
+    from importlib.util import find_spec
+    from pathlib import Path
+    from config_manager import load_config
+    from radar_db import init_radar_db
+
+    print("douyin-monitor 本地检查")
+    print("-" * 48)
+    print(f"Python: {sys.version.split()[0]}")
+
+    modules = ["playwright", "yaml", "fastapi", "uvicorn", "jinja2", "requests", "openpyxl", "zhconv"]
+    missing = [name for name in modules if find_spec(name) is None]
+    print(f"依赖: {'正常' if not missing else '缺少 ' + ', '.join(missing)}")
+
+    cfg = load_config()
+    radar_cfg = cfg.get("radar", {})
+    print(f"关键词: {len(radar_cfg.get('keywords', []))} 个")
+    print(f"时间范围: 近 {radar_cfg.get('days', 7)} 日")
+    print(f"输出目录: {radar_cfg.get('output_dir', './exports/radar')}")
+
+    init_db()
+    init_radar_db()
+    with get_db() as db:
+        work_count = db.execute("SELECT COUNT(*) FROM radar_works").fetchone()[0]
+        comment_count = db.execute("SELECT COUNT(*) FROM radar_comments").fetchone()[0]
+    print(f"数据库: 正常（作品 {work_count} 条，评论 {comment_count} 条）")
+
+    session_dir = Path(cfg.get("paths", {}).get("session_dir", "./douyin_session"))
+    cookie_files = [
+        session_dir / "Default" / "Cookies",
+        session_dir / "Default" / "Network" / "Cookies",
+    ]
+    session_ready = any(path.exists() for path in cookie_files)
+    session_text = "已保存登录态" if session_ready else "未确认登录态，请运行 login"
+    print(f"抖音会话: {session_text} ({session_dir})")
+
+    try:
+        from config_manager import get_browser_executable
+        from playwright.async_api import async_playwright
+
+        executable = get_browser_executable()
+        if not executable:
+            print("Chromium: 未安装")
+            print("安装命令: python -m playwright install chromium")
+        else:
+            async def _browser_smoke():
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(
+                        executable_path=str(executable),
+                        headless=True,
+                        args=["--no-sandbox"],
+                    )
+                    await browser.close()
+
+            try:
+                asyncio.run(_browser_smoke())
+                print(f"Chromium: 可启动 ({executable})")
+            except Exception as exc:
+                print(f"Chromium: 文件存在但当前环境无法启动 ({executable})")
+                print(f"启动错误: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        print(f"Chromium: 检查失败 ({exc})")
 
 
 # ─── 命令：transcribe ──────────────────────────────────────────
@@ -619,10 +750,12 @@ SYNC_COMMANDS = {
     "web": cmd_web,
     "transcribe": cmd_transcribe,
     "comments": cmd_comments,
+    "doctor": cmd_doctor,
 }
 
 ASYNC_COMMANDS = {
     "run": cmd_run,
     "schedule": cmd_schedule,
     "login": cmd_login,
+    "radar": cmd_radar,
 }

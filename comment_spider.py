@@ -1,5 +1,6 @@
 """评论区采集模块 — Playwright 拦截 + 翻页"""
 import logging
+import os
 import re
 import time
 import random
@@ -25,13 +26,19 @@ class CommentSpider:
         self.session_dir = Path(get("paths.session_dir", str(Path(__file__).parent / "douyin_session")))
 
     async def fetch_comments(
-        self, video_id: str, max_pages: int = 3, max_total: int = 30
+        self,
+        video_id: str,
+        max_pages: int = 3,
+        max_total: int = 30,
+        apply_filter: bool = True,
+        include_replies: bool = True,
     ) -> list[dict]:
         """
         抓取一个抖音视频的评论。
 
         返回 dict 列表，每个 dict 含：
-            comment_id, text, digg_count, reply_count, user_name, ip_label, create_time
+            comment_id, parent_comment_id, is_reply, text, digg_count,
+            reply_count, user_name, ip_label, create_time
         """
         comments: list[dict] = []
         seen_ids: set[str] = set()
@@ -41,17 +48,23 @@ class CommentSpider:
 
         async with async_playwright() as p:
             logger.info("  playwright 上下文已创建")
-            from config_manager import load_config
+            from config_manager import get_browser_executable, load_config
             cfg = load_config()
             s = cfg["spider"]
             self.session_dir.mkdir(parents=True, exist_ok=True)
-            context = await p.chromium.launch_persistent_context(
+            launch_options = dict(
                 user_data_dir=str(self.session_dir),
                 headless=self.headless,
                 viewport={"width": s["viewport_width"], "height": s["viewport_height"]},
                 user_agent=s["user_agent"],
                 locale=s["locale"],
             )
+            executable = get_browser_executable()
+            if executable:
+                launch_options["executable_path"] = str(executable)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                launch_options["args"] = ["--no-sandbox"]
+            context = await p.chromium.launch_persistent_context(**launch_options)
             page = context.pages[0] if context.pages else await context.new_page()
 
             # ── 收集拦截到的响应 ──
@@ -88,9 +101,29 @@ class CommentSpider:
                 data = collected.pop(0)
                 page_count += 1
 
-                parsed = self._parse_comments(data)
+                parsed = self._parse_comments(data, include_replies=include_replies)
+                # 部分页面只返回 reply_comment_total，不把回复正文内嵌；
+                # 对有回复的主评论补一次正常页面 fetch，最多 8 个父评论/页。
+                if include_replies:
+                    inline_parents = {
+                        c["parent_comment_id"] for c in parsed if c.get("is_reply")
+                    }
+                    reply_requests = 0
+                    for main in [c for c in parsed if not c.get("is_reply")]:
+                        if main["reply_count"] <= 0 or main["comment_id"] in inline_parents:
+                            continue
+                        if reply_requests >= 8:
+                            break
+                        reply_data = await self._fetch_replies_via_page(
+                            page, video_id, main["comment_id"], self.page_count
+                        )
+                        parsed.extend(self._parse_replies(reply_data, main["comment_id"]))
+                        reply_requests += 1
                 for c in parsed:
-                    if c["comment_id"] not in seen_ids and self._pass_filter(c):
+                    if (
+                        c["comment_id"] not in seen_ids
+                        and (not apply_filter or self._pass_filter(c))
+                    ):
                         seen_ids.add(c["comment_id"])
                         comments.append(c)
 
@@ -166,21 +199,80 @@ class CommentSpider:
             logger.warning("fetch 翻页异常: %s", exc)
             return None
 
-    def _parse_comments(self, data: dict) -> list[dict]:
+    async def _fetch_replies_via_page(
+        self, page, video_id: str, comment_id: str, count: int
+    ) -> dict | None:
+        """通过已登录页面读取一个主评论的可见回复。"""
+        script = f"""
+        (async () => {{
+            const url = new URL('/aweme/v1/web/comment/list/reply/', location.origin);
+            url.searchParams.set('device_platform', 'webapp');
+            url.searchParams.set('aid', '6383');
+            url.searchParams.set('channel', 'channel_pc_web');
+            url.searchParams.set('aweme_id', '{video_id}');
+            url.searchParams.set('comment_id', '{comment_id}');
+            url.searchParams.set('cursor', '0');
+            url.searchParams.set('count', '{count}');
+            url.searchParams.set('item_type', '0');
+            try {{
+                const resp = await fetch(url.toString(), {{credentials: 'include'}});
+                return await resp.json();
+            }} catch(e) {{
+                return {{error: e.message}};
+            }}
+        }})()
+        """
+        try:
+            result = await page.evaluate(script)
+            if isinstance(result, dict) and result.get("error"):
+                return None
+            return result
+        except Exception as exc:
+            logger.debug("回复 fetch 失败 comment_id=%s: %s", comment_id, exc)
+            return None
+
+    def _parse_comments(self, data: dict, include_replies: bool = True) -> list[dict]:
         """将 API 原始评论转为统一 dict。"""
         results = []
         for raw in data.get("comments", []):
-            user = raw.get("user") or {}
-            results.append({
-                "comment_id": str(raw.get("cid", "")),
-                "text": raw.get("text", "") or "",
-                "digg_count": raw.get("digg_count", 0) or 0,
-                "reply_count": raw.get("reply_comment_total", 0) or 0,
-                "user_name": user.get("nickname", "") or "",
-                "ip_label": raw.get("ip_label", "") or "",
-                "create_time": raw.get("create_time", 0) or 0,
-            })
+            results.append(self._parse_one(raw))
+            if include_replies:
+                replies = raw.get("reply_comment") or raw.get("reply_comment_list") or []
+                if isinstance(replies, dict):
+                    replies = replies.get("comments") or replies.get("list") or []
+                for reply in replies if isinstance(replies, list) else []:
+                    parsed = self._parse_one(reply)
+                    parsed["parent_comment_id"] = str(raw.get("cid", ""))
+                    parsed["is_reply"] = True
+                    results.append(parsed)
         return results
+
+    def _parse_replies(self, data: dict | None, parent_comment_id: str) -> list[dict]:
+        if not isinstance(data, dict):
+            return []
+        raw_items = data.get("comments") or data.get("reply_comments") or data.get("reply_comment_list") or []
+        results = []
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            parsed = self._parse_one(raw)
+            parsed["parent_comment_id"] = parent_comment_id
+            parsed["is_reply"] = True
+            results.append(parsed)
+        return results
+
+    @staticmethod
+    def _parse_one(raw: dict) -> dict:
+        user = raw.get("user") or {}
+        return {
+            "comment_id": str(raw.get("cid", "")),
+            "parent_comment_id": "",
+            "is_reply": False,
+            "text": raw.get("text", "") or "",
+            "digg_count": raw.get("digg_count", 0) or 0,
+            "reply_count": raw.get("reply_comment_total", 0) or 0,
+            "user_name": user.get("nickname", "") or "",
+            "ip_label": raw.get("ip_label", "") or "",
+            "create_time": raw.get("create_time", 0) or 0,
+        }
 
     def _pass_filter(self, c: dict) -> bool:
         """过滤规则：digg_count >= N AND reply_count >= N（可配置）"""

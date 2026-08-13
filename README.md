@@ -7,6 +7,11 @@
 - **博主管理** — 添加/删除/重命名监控目标，支持多种输入格式
 - **数据采集** — Playwright 无头浏览器模拟滚动，拦截 API 响应收集完整视频列表
 - **评论抓取** — 视频详情页拦截 + fetch 翻页，按点赞/回复数过滤优质评论
+- **关键词雷达** — 搜索 AI 工具会员相关关键词，筛选近 7 日作品并保存历史快照
+- **线索识别** — 采集可见评论/回复，按高意向/中意向/普通/疑似无关分类
+- **对标拆解** — Content Boom 互动加权、账号相对表现、评论意向密度、钩子/痛点/结构/CTA 拆解
+- **人工回填** — 在 Web 面板或 Excel 中记录咨询、加微信、成交，避免自动私信和自动互动
+- **多格式输出** — 作品评分 CSV、线索 CSV、JSON 和多 sheet Excel，可选飞书机器人 Webhook
 - **趋势追踪** — 每次抓取生成独立快照，对比历史数据发现涨粉/爆款
 - **语音转录** — faster-whisper 离线转写视频语音为文字（简体中文）
 - **Web 面板** — FastAPI + Jinja2 页面，概览仪表盘、视频列表、趋势图 (Chart.js)、系统配置
@@ -33,6 +38,10 @@ douyin-monitor/
 ├── commands.py           # 命令实现（add/remove/list/run/report/export/comments 等）
 ├── spider.py             # 抖音数据采集模块 (Playwright 滚动+API拦截)
 ├── comment_spider.py     # 评论区采集模块 (Playwright 拦截+fetch翻页)
+├── keyword_spider.py     # 关键词搜索采集（API响应解析 + DOM兜底）
+├── lead_scoring.py       # 评论意向、Content Boom、内容结构拆解
+├── radar_db.py           # 关键词雷达独立数据表
+├── radar.py              # 雷达运行编排和 Excel/飞书输出
 ├── db.py                 # SQLite 数据层（CRUD、快照、统计、批量查询）
 ├── utils.py              # URL 解析工具（sec_uid 提取、短链接重定向）
 ├── config_manager.py     # 统一配置管理（加载/保存/合并默认值）
@@ -55,6 +64,7 @@ douyin-monitor/
         ├── creators.html     # 博主管理（增删改查）
         ├── videos.html       # 视频列表（搜索/排序/分页）
         ├── video_detail.html # 视频详情（快照历史、评论抓取、转录文本）
+        ├── radar.html         # 关键词雷达（作品评分、评论意向、人工回填）
         ├── trends.html       # 趋势图（Chart.js 折线图）
         └── settings.html     # 系统配置管理页面
 ```
@@ -183,6 +193,50 @@ python monitor.py run --creator 1
 ```
 
 ## 快速开始
+
+### 关键词雷达（正式方案）
+
+在完成依赖安装和扫码登录后，可以直接执行：
+
+```bash
+# 使用 config.yaml 中的默认关键词，抓取近 7 日作品和高互动作品评论
+python monitor.py radar
+
+# 临时指定关键词；--keyword 可以重复使用
+python monitor.py radar --keyword "ChatGPT Plus" --keyword "付款失败" --days 7 --limit 20
+
+# 只搜索并评分作品，先不抓评论
+python monitor.py radar --keyword "AI工具会员" --no-comments
+
+# 本地环境检查
+python monitor.py doctor
+```
+
+结果默认保存到 `exports/radar/`：
+
+- `radar_export_*.xlsx`：作品评分、高/中意向评论、人工回填模板
+- `radar_works_*.csv`、`radar_leads_*.csv`：便于 Excel/飞书导入
+- `radar_report_*.json`：原始报告和后续二次处理数据
+
+启动 Web 面板后访问 `/radar`，可运行雷达、查看高分作品和评论，并记录“咨询”。
+“加微信”和“成交”需要人工在 Excel 的“人工回填” sheet 或接口中补齐。
+
+对接现有业务系统时可直接调用：
+
+```text
+POST /api/radar/run       {keywords, days, limit, fetch_comments}
+GET  /api/radar/works     读取作品评分和内容拆解
+GET  /api/radar/comments   读取评论意向（可传 work_id）
+GET  /api/radar/stats      读取咨询、加微信、成交统计
+POST /api/radar/feedback  回填咨询/加微信/成交
+POST /api/radar/export    输出 JSON/CSV/Excel
+```
+
+默认规则按照 `赞 + 2×收藏 + 3×评论 + 4×分享` 计算互动加权，再结合账号相对表现、近 7 日新鲜度和高意向评论密度。公开评论只能作为意向信号，不能直接当作有效客户或真实成交。
+
+如需 AI 增强内容拆解，在 `config.yaml` 设置 `radar.ai_enabled: true`、`ai_base_url`、`ai_model`，并通过环境变量提供 `AI_API_KEY`。未配置时自动使用规则拆解，不影响本地运行。
+
+如需推送摘要到飞书机器人，在 `radar.feishu_webhook` 配置机器人 Webhook 地址；完整 Excel 文件仍保存在本地输出目录。
 
 ### 1. 安装依赖
 

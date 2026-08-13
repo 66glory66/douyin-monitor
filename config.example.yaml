@@ -18,6 +18,32 @@ spider:
   page_load_wait: 8
   scroll_idle_limit: 20
 
+# 关键词雷达：近 N 日搜索作品、评论和回复，评分后输出人工复核清单
+radar:
+  enabled: true
+  keywords:
+    - "ChatGPT Plus"
+    - "ChatGPT Pro"
+    - "Codex"
+    - "Cursor"
+    - "Claude"
+    - "Gemini"
+    - "AI工具会员"
+    - "GPT充值"
+    - "付款失败"
+  days: 7
+  max_results_per_keyword: 20
+  max_comments_per_work: 100
+  comment_pages: 5
+  top_works_for_comments: 10
+  search_scrolls: 8
+  min_intent_score: 45
+  output_dir: "./exports/radar"
+  feishu_webhook: ""
+  ai_enabled: false
+  ai_base_url: ""
+  ai_model: ""
+
 # 转录配置
 transcriber:
   model: "small"

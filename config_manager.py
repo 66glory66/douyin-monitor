@@ -1,8 +1,28 @@
 """统一配置管理 — 读写 config.yaml，提供默认值"""
+import os
 import yaml
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
+LOCAL_PLAYWRIGHT_BROWSERS = Path(__file__).parent / "playwright-browsers"
+
+# 如果用户把 Chromium 安装到项目目录，后续启动无需每次手动设置环境变量。
+if LOCAL_PLAYWRIGHT_BROWSERS.exists():
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(LOCAL_PLAYWRIGHT_BROWSERS))
+
+
+def get_browser_executable() -> Path | None:
+    """返回可用 Chrome/Chromium 路径，优先使用配置或环境变量。"""
+    configured = os.getenv("DOUYIN_BROWSER_PATH", "")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(__file__).parent / "browser" / "chrome",
+        Path("/tmp/douyin-monitor-browser/chrome/opt/google/chrome/chrome"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+    ]
+    return next((path for path in candidates if path and path.is_file()), None)
 
 DEFAULTS = {
     "schedule": {
@@ -33,6 +53,25 @@ DEFAULTS = {
         "inter_video_delay_max": 6,
         "filter_digg_min": 1,
         "filter_reply_min": 1,
+    },
+    "radar": {
+        "enabled": True,
+        "keywords": [
+            "ChatGPT Plus", "ChatGPT Pro", "Codex", "Cursor", "Claude", "Gemini",
+            "AI工具会员", "GPT充值", "GPT额度", "付款失败", "Plus和Pro区别",
+        ],
+        "days": 7,
+        "max_results_per_keyword": 20,
+        "max_comments_per_work": 100,
+        "comment_pages": 5,
+        "top_works_for_comments": 10,
+        "search_scrolls": 8,
+        "min_intent_score": 45,
+        "output_dir": "./exports/radar",
+        "feishu_webhook": "",
+        "ai_enabled": False,
+        "ai_base_url": "",
+        "ai_model": "",
     },
     "transcriber": {
         "model": "small",

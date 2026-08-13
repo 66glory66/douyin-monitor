@@ -14,8 +14,12 @@
   python monitor.py transcribe [--creator <id>] [--limit N] [--workers 2] 转录视频语音
   python monitor.py export [--creator <id>]                  导出 CSV
   python monitor.py web [--port <port>]                      启动 Web 面板
-	  python monitor.py comments [--creator <id>]                抓取评论区（点赞>0 且有回复的评论）
+  python monitor.py comments [--creator <id>]                抓取评论区（点赞>0 且有回复的评论）
 	                       [--video-limit N] [--pages N] [--comment-limit N]
+  python monitor.py doctor                                    检查本地依赖、浏览器、会话和数据库
+  python monitor.py radar [--keyword <词>] [--days 7] [--limit 20]
+                                                               关键词雷达：作品/评论/回复/评分/导出
+                                                               [--no-comments] [--headed]
 """
 
 import asyncio

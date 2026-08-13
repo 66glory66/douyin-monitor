@@ -1,6 +1,7 @@
 """抖音博主视频采集模块 - 滚动触发 + API 拦截 (可复用)"""
 import logging
 import asyncio
+import os
 import random
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -210,17 +211,23 @@ class DouyinSpider:
         self._error = None
 
         async with async_playwright() as p:
-            from config_manager import load_config
+            from config_manager import get_browser_executable, load_config
             cfg = load_config()
             s = cfg["spider"]
             SESSION_DIR.mkdir(parents=True, exist_ok=True)
-            context = await p.chromium.launch_persistent_context(
+            launch_options = dict(
                 user_data_dir=str(SESSION_DIR),
                 headless=self.headless,
                 viewport={"width": s["viewport_width"], "height": s["viewport_height"]},
                 user_agent=s["user_agent"],
                 locale=s["locale"],
             )
+            executable = get_browser_executable()
+            if executable:
+                launch_options["executable_path"] = str(executable)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                launch_options["args"] = ["--no-sandbox"]
+            context = await p.chromium.launch_persistent_context(**launch_options)
             page = await context.new_page()
             page.on("response", self._on_response)
             page.on("response", self._on_profile_response)

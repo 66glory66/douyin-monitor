@@ -269,13 +269,20 @@ class VideoFetcher:
 
     def __enter__(self):
         from playwright.sync_api import sync_playwright
+        from config_manager import get_browser_executable
         self._playwright = sync_playwright().start()
         self._session_dir.mkdir(parents=True, exist_ok=True)
         _ua, _vp, _lang = _pick_fingerprint(self._session_dir)
-        self._context = self._playwright.chromium.launch_persistent_context(
+        launch_options = dict(
             user_data_dir=str(self._session_dir), headless=True,
             viewport=_vp, user_agent=_ua, locale=_lang,
         )
+        executable = get_browser_executable()
+        if executable:
+            launch_options["executable_path"] = str(executable)
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            launch_options["args"] = ["--no-sandbox"]
+        self._context = self._playwright.chromium.launch_persistent_context(**launch_options)
         # 注入已有 cookies（douyin_benxian1.json）
         _ensure_cookies()
         _inject_cookies_to_context(self._context)

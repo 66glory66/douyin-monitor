@@ -30,3 +30,5 @@ config.yaml
 
 # Python 运行时缓存
 Python/
+.venv/
+.pytest_cache/
