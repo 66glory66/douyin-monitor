@@ -25,6 +25,11 @@ from db import (
     ingest_crawl_results, upsert_comment, list_comments, get_comment_count,
     delete_absent_comments,
 )
+from radar import RadarRunner
+from radar_db import (
+    add_feedback, get_radar_conversion_summary, get_radar_work, init_radar_db,
+    list_radar_comments, list_radar_works,
+)
 from spider import DouyinSpider
 from utils import resolve_secuid, async_resolve_secuid
 
@@ -44,6 +49,7 @@ env.filters["int"] = int
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    init_radar_db()
     logger.info("数据库已初始化")
     yield
 
@@ -130,6 +136,20 @@ def settings_page(request: Request):
     """系统配置管理页面。"""
     from config_manager import load_config
     return render("settings.html", config=load_config())
+
+
+@app.get("/radar", response_class=HTMLResponse)
+async def radar_page(request: Request):
+    from config_manager import load_config
+    cfg = load_config().get("radar", {})
+    days = int(cfg.get("days", 7))
+    return render(
+        "radar.html",
+        works=list_radar_works(limit=50, days=days),
+        comments=list_radar_comments(limit=50),
+        stats=get_radar_conversion_summary(days),
+        config=cfg,
+    )
 
 
 @app.get("/videos", response_class=HTMLResponse)
@@ -317,6 +337,56 @@ async def api_run_fetch(creator_id: int = None):
         detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         logger.exception("抓取出错")
         return JSONResponse({"error": f"抓取出错: {detail}"}, 500)
+
+
+@app.post("/api/radar/run")
+async def api_radar_run(data: dict = Body(default={})):
+    """运行关键词雷达；始终保留人工确认环节。"""
+    try:
+        result = await RadarRunner(headless=data.get("headless")).run(
+            keywords=data.get("keywords") or None,
+            days=data.get("days"),
+            limit=data.get("limit"),
+            fetch_comments=bool(data.get("fetch_comments", True)),
+        )
+        return result
+    except Exception as exc:
+        logger.exception("雷达运行失败")
+        return JSONResponse({"error": f"雷达运行失败: {exc}"}, 500)
+
+
+@app.get("/api/radar/works")
+async def api_radar_works(days: int = Query(7), limit: int = Query(50)):
+    return {"works": list_radar_works(limit=max(1, min(limit, 500)), days=max(1, days))}
+
+
+@app.get("/api/radar/comments")
+async def api_radar_comments(work_id: int | None = Query(None), limit: int = Query(200)):
+    return {"comments": list_radar_comments(work_id=work_id, limit=max(1, min(limit, 1000)))}
+
+
+@app.get("/api/radar/stats")
+async def api_radar_stats(days: int = Query(7)):
+    return get_radar_conversion_summary(max(1, days))
+
+
+@app.post("/api/radar/feedback")
+async def api_radar_feedback(data: dict = Body(default={})):
+    try:
+        work_id = int(data.get("work_id"))
+        if not get_radar_work(work_id):
+            return JSONResponse({"error": "作品不存在"}, 404)
+        feedback_id = add_feedback(work_id, data)
+        return {"ok": True, "id": feedback_id}
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": f"回填失败: {exc}"}, 400)
+
+
+@app.post("/api/radar/export")
+async def api_radar_export(days: int = Body(7), limit: int = Body(200)):
+    works = list_radar_works(limit=max(1, min(limit, 1000)), days=max(1, days))
+    files = RadarRunner().export(works, days=max(1, days))
+    return {"ok": True, "files": files}
 
 
 @app.get("/api/trends/{creator_id}")
