@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>关键词雷达</h1>
+<p class="muted">近 {{ config.days | default(7) }} 日作品 → 评论/回复 → 意向分层 → 内容拆解。结果只用于人工复核和记录，不自动互动。</p>
+
+<div class="actions-top">
+    <input id="radar-keywords" class="input" style="min-width:360px" value="{{ config.keywords | default([]) | join(',') }}" placeholder="关键词，用逗号分隔">
+    <input id="radar-days" class="input" style="width:80px" type="number" min="1" value="{{ config.days | default(7) }}">
+    <button class="btn btn-primary" onclick="runRadar()">🔎 运行雷达</button>
+    <button class="btn btn-outline" onclick="exportRadar()">📥 导出 Excel/CSV</button>
+    <span id="radar-status" class="fetch-status"></span>
+</div>
+
+<div class="summary-grid">
+    <div class="summary-card"><div class="summary-icon">🎬</div><div class="summary-value">{{ works | length }}</div><div class="summary-label">雷达作品</div></div>
+    <div class="summary-card"><div class="summary-icon">🔥</div><div class="summary-value">{{ works | selectattr('boom_score', 'ge', 70) | list | length }}</div><div class="summary-label">高 Boom 作品</div></div>
+    <div class="summary-card"><div class="summary-icon">🎯</div><div class="summary-value">{{ comments | selectattr('intent_label', 'equalto', 'high') | list | length }}</div><div class="summary-label">高意向评论</div></div>
+    <div class="summary-card"><div class="summary-icon">🧑‍💼</div><div class="summary-value">{{ stats.consulted | default(0) }}</div><div class="summary-label">已记录咨询</div></div>
+    <div class="summary-card"><div class="summary-icon">📱</div><div class="summary-value">{{ stats.added_wechat | default(0) }}</div><div class="summary-label">已加微信</div></div>
+    <div class="summary-card"><div class="summary-icon">💰</div><div class="summary-value">{{ stats.purchased | default(0) }}</div><div class="summary-label">已成交</div></div>
+</div>
+
+<section class="card" style="margin-top:24px">
+    <h2>高分对标作品</h2>
+    {% if works %}
+    <div class="table-wrap">
+    <table class="data-table">
+        <thead><tr><th>作品</th><th>作者</th><th>Boom</th><th>互动</th><th>高意向</th><th>路径</th><th>拆解</th></tr></thead>
+        <tbody>
+        {% for w in works %}
+        <tr>
+            <td><a href="{{ w.url }}" target="_blank" rel="noopener">{{ (w.title or '无标题')[:55] }}</a><div class="muted">{{ w.platform_work_id }} · {{ w.create_time | int }}</div></td>
+            <td>{{ w.author_name or '-' }}</td>
+            <td><strong>{{ w.boom_score | round(1) }}</strong></td>
+            <td>👍{{ w.like_count | int }} 💬{{ w.comment_count | int }} ↗{{ w.share_count | int }}</td>
+            <td>{{ w.high_intent_count | int }} / {{ w.lead_count | int }}</td>
+            <td>{{ w.content_path or '-' }}</td>
+            <td><span class="badge">{{ w.analysis_provider or '待分析' }}</span><br>{{ (w.hook or '')[:34] }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}<p class="muted">还没有雷达数据。先扫码登录，再运行关键词雷达。</p>{% endif %}
+</section>
+
+<section class="card" style="margin-top:24px">
+    <h2>待人工复核的评论意向</h2>
+    {% if comments %}
+    <div class="comment-list">
+    {% for c in comments %}
+        <div class="comment-item">
+            <span class="badge badge-{{ c.intent_label }}">{{ c.intent_label }}</span>
+            <strong>{{ c.intent_score | int }}分</strong>
+            <span>{{ c.user_name or '匿名用户' }}</span>
+            <span class="comment-text">{{ c.text }}</span>
+            <span class="muted">{{ c.intent_reason }}</span>
+            <button class="btn btn-outline btn-sm" onclick="markFeedback({{ c.work_id }}, {{ c.id }}, 'consulted')">咨询</button>
+            <button class="btn btn-outline btn-sm" onclick="markFeedback({{ c.work_id }}, {{ c.id }}, 'wechat')">加微信</button>
+            <button class="btn btn-outline btn-sm" onclick="markFeedback({{ c.work_id }}, {{ c.id }}, 'purchased')">成交</button>
+        </div>
+    {% endfor %}
+    </div>
+    {% else %}<p class="muted">暂无评论；雷达会优先抓取高互动作品的可见评论和回复。</p>{% endif %}
+</section>
+
+<script>
+async function runRadar() {
+    var status = document.getElementById('radar-status');
+    status.textContent = '⏳ 搜索、采集并评分中...';
+    var keywords = document.getElementById('radar-keywords').value.split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+    var days = Number(document.getElementById('radar-days').value || 7);
+    try {
+        var resp = await fetch('/api/radar/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({keywords:keywords, days:days, fetch_comments:true})});
+        var data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || '运行失败');
+        status.textContent = '完成：' + data.works + ' 条作品';
+        showToast('雷达完成，已输出作品和线索清单', 'success');
+        setTimeout(function(){ location.reload(); }, 1200);
+    } catch (e) { status.textContent = '失败'; showToast(String(e), 'error'); }
+}
+
+async function exportRadar() {
+    try {
+        var resp = await fetch('/api/radar/export', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({days:Number(document.getElementById('radar-days').value || 7), limit:500})});
+        var data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || '导出失败');
+        showToast('已输出到 exports/radar', 'success');
+    } catch (e) { showToast(String(e), 'error'); }
+}
+
+async function markFeedback(workId, commentId, type) {
+    try {
+        var body = {work_id:workId, comment_db_id:commentId, note:'Web 面板人工回填'};
+        body.consulted = type === 'consulted' || type === 'wechat' || type === 'purchased';
+        body.added_wechat = type === 'wechat' || type === 'purchased';
+        body.purchased = type === 'purchased';
+        var resp = await fetch('/api/radar/feedback', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        if (!resp.ok) throw new Error('保存失败');
+        showToast('已记录：' + type, 'success');
+        setTimeout(function(){ location.reload(); }, 500);
+    } catch (e) { showToast(String(e), 'error'); }
+}
+</script>
+{% endblock %}
